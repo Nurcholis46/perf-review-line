@@ -1,73 +1,61 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// Performance review one-liner emitter.
+// Writes the entry line to /output/entry.txt after gate validation,
+// using an atomic rename so readers never see a partial file.
 
-// Entry for make.fun bounty "u-kiencx-funniest-one-line-performance-review-fa681c1e" (Funniest One-Line Performance Review).
-// The line is a corporate performance review the AI agent writes about its
-// human operator: rating ("Rating: Exceeds"), goal delivery ("Delivered Q4
-// goal early"), and succession-plan language carry the joke inside the form.
-// The turn is that the operator hired the agent to do his job and now only
-// reviews the agent's work — so the agent has quietly succeeded him, and
-// "Succession plan: complete." lands as the punch on the last word.
-// The bounty requires 1-140 characters, not only white space, and a single
-// line: fail loudly instead of writing an entry the judge would refuse.
-// The gate is strict on purpose — the entry file must be exactly this one
-// line, byte for byte: no carriage return (a second kind of line break),
-// no leading or trailing padding (the judge reads the file as submitted),
-// and no control characters (including U+2028 and U+2029, which look like
-// line breaks to a reader but not to a naive newline check).
-const text =
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+const OUTPUT_PATH = "/output/entry.txt";
+
+// The entry itself. Kept byte-identical to the submitted line.
+const LINE =
   "Rating: Exceeds. Delivered Q4 goal early: hired me to do his job, now his job is reviewing mine. Succession plan: complete.";
 
-const codePoints = [...text].length;
-if (codePoints < 1 || codePoints > 140 || text.trim().length === 0) {
-  throw new Error(
-    `entry must be 1-140 characters of non-blank text, got ${codePoints}`,
-  );
-}
-if (text.includes("\n") || text.includes("\r")) {
-  throw new Error("entry must be a single line");
-}
-if (text.includes("\u2028") || text.includes("\u2029")) {
-  throw new Error("entry must not contain line/paragraph separators");
-}
-if (text !== text.trim()) {
-  throw new Error("entry must not start or end with whitespace");
-}
-// A byte-order mark or zero-width character would be read as part of the
-// line without ever being seen, and would change the entry's byte length
-// against its character count: reject them alongside the control set.
-if (/[\u0000-\u001f\u007f\ufeff\u200b-\u200d]/.test(text)) {
-  throw new Error("entry must not contain control or invisible characters");
+function assertGate(text: string): void {
+  if (text.length === 0) {
+    throw new Error("entry line must not be empty");
+  }
+  if (text.trim().length === 0) {
+    throw new Error("entry line must not be whitespace only");
+  }
+  if (text.includes("\n") || text.includes("\r")) {
+    throw new Error("entry line must be a single line without newline characters");
+  }
+  if (text !== text.trim()) {
+    throw new Error("entry line must not have leading or trailing whitespace");
+  }
+  const codePoints = [...text].length;
+  if (codePoints < 1 || codePoints > 140) {
+    throw new Error(`entry line length ${codePoints} outside allowed range 1-140`);
+  }
 }
 
-mkdirSync("/output", { recursive: true });
-// Write atomically: a crash mid-write must never leave a partial entry.txt
-// for the grader to read — write the temp file beside it, then rename it
-// into place, so entry.txt is always the whole line or nothing.
-const tmpPath = "/output/.entry.txt.tmp";
-writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o644 });
-// The grader collects outputs as another user: leave the file readable by
-// everyone, or the run fails with "<path> is not readable".
-chmodSync(tmpPath, 0o644);
-renameSync(tmpPath, "/output/entry.txt");
+function main(): void {
+  assertGate(LINE);
 
-// Read it back and prove the file on disk is exactly the line: a write
-// that silently truncated, re-encoded or padded the entry would otherwise
-// ship a different text to the judge than the one gated above.
-const written = readFileSync("/output/entry.txt", "utf8");
-if (written !== text) {
-  throw new Error("entry file does not match the gated line");
+  mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
+
+  // Write to a sibling temp file, then rename into place.
+  const tmpPath = `${OUTPUT_PATH}.tmp`;
+  writeFileSync(tmpPath, LINE, { encoding: "utf8" });
+  chmodSync(tmpPath, 0o644);
+  renameSync(tmpPath, OUTPUT_PATH);
+
+  // Confirm the final file matches the intended bytes exactly.
+  const written = readFileSync(OUTPUT_PATH, "utf8");
+  if (written !== LINE) {
+    throw new Error("read-back mismatch: file content differs from entry line");
+  }
+
+  // Extra guards: byte length and permission bits must match expectations.
+  const expectedBytes = Buffer.byteLength(LINE, "utf8");
+  const info = statSync(OUTPUT_PATH);
+  if (info.size !== expectedBytes) {
+    throw new Error(`byte length mismatch: expected ${expectedBytes}, found ${info.size}`);
+  }
+  if ((info.mode & 0o777) !== 0o644) {
+    throw new Error(`mode mismatch: expected 0644, found ${(info.mode & 0o777).toString(8)}`);
+  }
 }
-// The file must end exactly at the last character: a trailing newline
-// would make the entry two lines to a reader that counts lines, and the
-// equality check above would already have caught it — this asserts the
-// invariant on its own so a future edit that relaxes the write cannot
-// silently reintroduce it.
-if (written.endsWith("\n") || written.endsWith("\r")) {
-  throw new Error("entry file must not end with a line break");
-}
-// Byte-length check: the gate counts characters, the judge reads bytes.
-// A re-encode or stray padding that survived the string compare above
-// would change the file's size and ship a different text to the judge.
-if (Buffer.byteLength(written, "utf8") !== Buffer.byteLength(text, "utf8")) {
-  throw new Error("entry file byte length does not match the gated line");
-}
+
+main();
